@@ -8,6 +8,7 @@ password = "p@ssword1"
 client_id = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 client_secret = "123456789123456789"
 login_url = "login.salesforce.com"
+org_id = "00Di0000000xxxx"
 version = "39.0"
 proxies = {"https": "mock.proxy.server.com:8080"}
 tests_dir = os.path.dirname(os.path.realpath(__file__))
@@ -20,11 +21,13 @@ def add_response(res_key):
     else:
         with open(os.path.join(tests_dir, "fixtures/%s.json" % res_key)) as f:
             res = mock_responses[res_key] = json.loads(f.read())
+
+    body =  None if res["body"] is None else json.dumps(res["body"])
+
     responses.add(
         res["method"],
         res["url"],
-        body=json.dumps(
-            res["body"]),
+        body=body,
         status=res["status_code"],
         content_type=res["content_type"])
 

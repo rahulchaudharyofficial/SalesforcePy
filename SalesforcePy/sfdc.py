@@ -10,6 +10,7 @@ from __future__ import absolute_import
 
 from . import chatter
 from . import commons
+from . import einstein
 from . import jobs
 from . import wave
 
@@ -46,6 +47,19 @@ Content-Disposition: form-data; name="%s"; filename="%s"
 
 --boundary_string--"""
 
+class ApexRest(commons.BaseRequest):
+    """Performs a request to `'/services/apexrest/<action>'`"""
+
+    def __init__(
+            self, session_id, instance_url, action, http_method, request_params, request_body, **kwargs):
+        if request_params is not None:
+            p = urlencode(request_params)
+            action = '%s?%s' % (action, p)
+
+        super().__init__(
+                session_id, instance_url, http_method=http_method, request_body=request_body, **kwargs)
+        self.service = '/services/apexrest/%s' % action
+
 
 class ApprovalProcess(commons.BaseRequest):
     """ Returns a list of all approval processes. Can also be used to submit a particular record # noqa
@@ -64,11 +78,7 @@ class ApprovalProcess(commons.BaseRequest):
             **kwargs)
 
         self.service = APPROVAL_SERVICE % self.api_version
-
-        if self.request_body is None:
-            self.http_method = 'GET'
-        elif self.request_body is not None:
-            self.http_method = 'POST'
+        self.http_method = 'GET' if self.request_body is None else 'POST'
 
 
 class Client(object):
@@ -96,12 +106,15 @@ class Client(object):
                     Default: `None`
                 * *version* (`string`) --
                    SFDC API version to use e.g. '39.0'
+                * *org_id* (`string`) --
+                   Organisation ID (required if logging in via SOAP endpoint)
         """
 
         self.username = args[0]
         self.password = args[1]
         self.client_id = args[2]
         self.client_secret = args[3]
+        self.org_id = kwargs.get('org_id')
         self.protocol = kwargs.get('protocol')
         self.proxies = kwargs.get('proxies')
         self.instance_url = None
@@ -114,6 +127,7 @@ class Client(object):
         self.chatter = chatter.Chatter(self)
         self.jobs = jobs.Jobs(self)
         self.wave = wave.Wave(self)
+        self.einstein = einstein.Einstein(self)
 
     def set_instance_url(self, url):
         """ Strips the protocol from `url` and assigns the value to `self.instance_url`
@@ -152,6 +166,30 @@ class Client(object):
             self.set_api_version()
 
         return req, login_response
+    
+    @commons.kwarg_adder
+    def login_via_soap(self, **kwargs):
+        """ Performs a clientless login request using the Soap API.
+
+          :param: **kwargs: kwargs
+          :type: **kwargs: dict
+          :return: Login response
+          :rtype: (dict, commons.SoapLoginRequest)
+        """
+        login_response = commons.SoapLoginRequest(
+            self.username,
+            self.password,
+            **kwargs
+        )
+
+        req = login_response.request()
+
+        if login_response.status == 200:
+            self.session_id = login_response.session_id
+            self.instance_url = login_response.instance_url
+            self.set_api_version()
+
+        return req, login_response
 
     @commons.kwarg_adder
     def set_api_version(self, **kwargs):
@@ -168,10 +206,7 @@ class Client(object):
             headers = {'Content-Type': 'application/json'}
             r = requests.get(service, headers=headers, proxies=self.proxies)
             if r.status_code == 200:
-                versions = []
-                for i in r.json():
-                    versions.append(i['version'])
-                self.client_kwargs.update({'version': max(versions)})
+                self.client_kwargs.update({'version': max(i['version'] for i in r.json())})
             else:
                 # return a known recent api version
                 self.client_kwargs.update({'version': DEFAULT_API_VERSION})
@@ -232,11 +267,11 @@ class Client(object):
           :rtype: SObjectController
         """
 
-        _id = kwargs['id'] if 'id' in kwargs else None
-        object_type = kwargs['object_type'] if 'object_type' in kwargs else None
-        binary_field = kwargs['binary_field'] if 'binary_field' in kwargs else None
+        _id = kwargs.get('id')
+        object_type = kwargs.get('object_type')
+        binary_field = kwargs.get('binary_field')
         api_version = kwargs.get('version')
-        external_id = kwargs['external_id'] if 'external_id' in kwargs else None
+        external_id = kwargs.get('external_id')
         return SObjectController(self, object_type, _id, binary_field, api_version, external_id)
 
     @commons.kwarg_adder
@@ -276,6 +311,33 @@ class Client(object):
         return req, ea
 
     @commons.kwarg_adder
+    def apexrest(self, action, http_method, request_params=None, request_body=None, **kwargs):
+        """
+        Performs a request to `/services/apexrest/<action>`.
+
+        Args:
+            action (str): The Apex REST resource name.
+            http_method (str): The HTTP method for the request (e.g., 'GET', 'POST', 'PUT', 'PATCH', 'DELETE').
+            request_params (dict): Query parameters for the request.
+            request_body (dict): Request body data for POST and PUT requests.
+
+        Returns:
+            tuple: A tuple containing the HTTP response and the request object.
+        """
+        apex_rest_request = ApexRest(
+            self.session_id,
+            self.instance_url,
+            action,
+            http_method,
+            request_params,
+            request_body,
+            **kwargs
+        )
+
+        req = apex_rest_request.request()
+        return req, apex_rest_request
+
+    @commons.kwarg_adder
     def approvals(self, body=None, **kwargs):
         """ Performs an approval process request.
 
@@ -311,11 +373,8 @@ class Client(object):
         """
 
         logger = self.logger
-        if 'level' in kwargs:
-            level = kwargs['level']
-            logger.setLevel(level)
-        else:
-            logger.setLevel(logging.INFO)
+        level = kwargs.get('level', logging.INFO)
+        logger.setLevel(level)
 
     def __enter__(self):
         """
@@ -404,7 +463,7 @@ class Login(commons.OAuthRequest):
         super(Login, self).__init__(None, None, **kwargs)
         self.username = username
         self.password = password
-        self.login_url = kwargs['login_url'] if 'login_url' in kwargs else 'login.salesforce.com'
+        self.login_url = kwargs.get('login_url', 'login.salesforce.com')
         self.client_id = client_id
         self.client_secret = client_secret
         self.http_method = 'POST'
@@ -534,14 +593,14 @@ class QueryMore(commons.BaseRequest):
 
         (last, results) = (
             dict(),
-            list() if len(args) is 0 else args[0],
+            list() if len(args) == 0 else args[0],
         )
 
         len_results = len(results)
 
         if len_results == 0:
-            q = Query(self.session_id, self.instance_url, self.query_string)
-            q.set_proxies(self.proxies)
+            q = Query(self.session_id, self.instance_url, self.query_string,
+                      proxies=self.proxies, version=self.api_version)
             response = q.request()
             results.append(response)
             last = response
@@ -1012,7 +1071,7 @@ class SObjects(commons.BaseRequest):
             return response
 
 
-def client(username, password, client_id, client_secret, **kwargs):
+def client(username, password, client_id=None, client_secret=None, **kwargs):
     """ Builds a `Client` and returns it.
 
         .. versionadded:: 1.0.0
@@ -1056,10 +1115,6 @@ def client(username, password, client_id, client_secret, **kwargs):
         raise ValueError('`username` cannot be None')
     elif password is None:
         raise ValueError('`password` cannot be None')
-    elif client_id is None:
-        raise ValueError('`client_id` cannot be None')
-    elif client_secret is None:
-        raise ValueError('`client_secret` cannot be None')
     return Client(
         username,
         password,
